@@ -17,9 +17,11 @@
 
 #include <config.h>
 
+#include <dirent.h>
 #include <endian.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <glib/gstdio.h>
 #include <inttypes.h>
 #include <libdevmapper.h>
 #include <linux/fs.h>
@@ -38,6 +40,15 @@
 #include "mbr.h"
 #include "gpt.h"
 #include "ldm.h"
+
+#ifndef G_DEFINE_AUTOPTR_CLEANUP_FUNC_FILE_CLOSER
+#define G_DEFINE_AUTOPTR_CLEANUP_FUNC_FILE_CLOSER
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(FILE, fclose)
+#endif
+#ifndef G_DEFINE_AUTOPTR_CLEANUP_FUNC_DIR_CLOSER
+#define G_DEFINE_AUTOPTR_CLEANUP_FUNC_DIR_CLOSER
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(DIR, closedir)
+#endif
 
 #define DM_UUID_PREFIX "LDM-"
 
@@ -2729,6 +2740,187 @@ out:
     return r;
 }
 
+static int _find_partition(GString * target_params, const gchar * dev_name,
+                           guint64 abs_part_start, guint64 part_size,
+                           GError ** const err)
+{
+    g_autofree gchar * base_name = g_path_get_basename(dev_name);
+    if (!base_name || strlen(base_name) == 0) {
+        g_set_error(err, LDM_ERROR, LDM_ERROR_INTERNAL,
+                    "Unable to obtain base name for %s", dev_name);
+        return -1;
+    }
+
+    g_autofree gchar * sysfs_path = g_strdup_printf("/sys/block/%s",
+                                                    base_name);
+    if (!sysfs_path) {
+        g_set_error(err, LDM_ERROR, LDM_ERROR_INTERNAL,
+                    "Unable to create sysfs path for %s", base_name);
+        return -1;
+    }
+
+    g_autoptr(DIR) dir = opendir(sysfs_path);
+    if (!dir) {
+        g_set_error(err, LDM_ERROR, LDM_ERROR_IO,
+                    "Unable to open dir %s", sysfs_path);
+        return -1;
+    }
+
+    struct dirent * entry;
+    int found = 0;
+    while (errno = 0, (entry = readdir(dir)) != NULL && !found) {
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        g_autofree gchar * partition_dir_path = g_build_filename(sysfs_path,
+                                                                 entry->d_name,
+                                                                 NULL);
+        if (!partition_dir_path)
+        {
+            g_warning("Unable to build partition dir for %s/%s", sysfs_path,
+                      entry->d_name);
+            continue;
+        }
+
+        g_autofree gchar * partition_file_path = g_build_filename(
+            partition_dir_path, "partition", NULL);
+        g_autofree gchar * start_file_path = g_build_filename(
+            partition_dir_path, "start", NULL);
+        g_autofree gchar * size_file_path = g_build_filename(
+            partition_dir_path, "size", NULL);
+
+        if (!partition_file_path)
+        {
+            g_warning("Unable to build partition file path for %s",
+                      partition_dir_path);
+            continue;
+        }
+        if (!start_file_path)
+        {
+            g_warning("Unable to build start file path for %s",
+                      partition_dir_path);
+            continue;
+        }
+        if (!size_file_path)
+        {
+            g_warning("Unable to build size file path for %s",
+                      partition_dir_path);
+            continue;
+        }
+
+        if (g_access(partition_file_path, F_OK) != 0) {
+            /* no warning - this is a check that filters out non-partition
+               subdirs */
+            continue;
+        }
+        if (g_access(start_file_path, F_OK) != 0) {
+            g_warning("Unable to access %s", start_file_path);
+            continue;
+        }
+        if (g_access(size_file_path, F_OK) != 0) {
+            g_warning("Unable to access %s", size_file_path);
+            continue;
+        }
+
+        /* Check if the 'partition' file exists within this subdirectory
+           This is a filter against other subdirectories that do not
+           refer to partitions */
+
+        g_autoptr(FILE) fstart = fopen(start_file_path, "r");
+        if (!fstart)
+        {
+            g_warning("Unable to open %s", start_file_path);
+            continue;
+        }
+
+        guint64 curr_part_start = 0;
+        if (fscanf(fstart, "%" PRIu64, &curr_part_start) != 1) {
+            g_warning("Unable to parse %s", start_file_path);
+            continue;
+        }
+
+        g_autoptr(FILE) fsize = fopen(size_file_path, "r");
+        if (!fsize)
+        {
+            g_warning("Unable to open %s", size_file_path);
+            continue;
+        }
+
+        guint64 curr_part_size = 0;
+        if (fscanf(fsize, "%" PRIu64, &curr_part_size) != 1) {
+            g_warning("Unable to parse %s", size_file_path);
+            continue;
+        }
+
+        guint64 curr_part_end = curr_part_start + curr_part_size;
+        guint64 target_part_end = abs_part_start + part_size;
+
+        if (abs_part_start >= curr_part_start &&
+            target_part_end <= curr_part_end)
+        {
+            g_autofree gchar * dev_dir = g_path_get_dirname(dev_name);
+            if (!dev_dir)
+            {
+                g_set_error(err, LDM_ERROR, LDM_ERROR_INTERNAL,
+                            "Unable to extract dir from %s", dev_name);
+                return -1;
+            }
+
+            g_autofree gchar * full_part_path = g_build_filename(dev_dir, entry->d_name, NULL);
+            if (!full_part_path)
+            {
+                g_set_error(err, LDM_ERROR, LDM_ERROR_INTERNAL,
+                            "Unable to build file path for %s/%s", dev_dir,
+                            entry->d_name);
+                return -1;
+            }
+
+            g_string_printf(target_params, "%s %" PRIu64,
+                        full_part_path,
+                        abs_part_start - curr_part_start);
+            found = 1;
+        }
+    }
+
+    if (errno != 0) {
+        g_set_error(err, LDM_ERROR, LDM_ERROR_IO,
+                    "Unable to enumerate drive dir %s", sysfs_path);
+    }
+
+    return found ? 0 : -1;
+}
+
+static void _refine_partition(GString* target_params,
+                              const LDMDiskPrivate * const disk,
+                              guint64 part_start, guint64 part_size,
+                              GError ** const err)
+{
+    /* The goal here is to try to use partition's block device instead
+       of whole disk's device. The problem of using the whole disk is this:
+       If LDM disk has at least one partition mounted directly, then it won't
+       be possible to create *any* LDM devmapper device using that disk.
+
+       Mounting LDM partition directly may make sense for cases like Linux
+       system booting from LDM. The approach is the following:
+       1. First, you need to split GPT/MBR's LDM protective partition into a few
+       separate protective partitions, so that your target LDM partition is
+       exactly matched by one protective partition.
+       2. Then you'll be able to mount it as usual, boot from it and so on.
+       Windows actually does this for its C:\ partition is the respective
+       disk is converted to LDM. */
+
+    if (_find_partition(target_params, disk->device,
+        disk->data_start + part_start, part_size, err) == 0) {
+        return;
+    }
+
+    /* fallback */
+    g_string_printf(target_params, "%s %" PRIu64,
+                disk->device, disk->data_start + part_start);
+}
+
 static GString *
 _dm_create_part(const LDMPartitionPrivate * const part, uint32_t cookie,
                 GError ** const err)
@@ -2747,8 +2939,7 @@ _dm_create_part(const LDMPartitionPrivate * const part, uint32_t cookie,
     target.size = part->size;
     target.type = "linear";
     target.params = g_string_new("");
-    g_string_printf(target.params, "%s %" PRIu64,
-                    disk->device, disk->data_start + part->start);
+    _refine_partition(target.params, disk, part->start, part->size, err);
 
     GString *name = _dm_part_name(part);
     GString *uuid = _dm_part_uuid(part);
@@ -2817,9 +3008,8 @@ _dm_create_spanned(const LDMVolumePrivate * const vol, GError ** const err)
         target->size = part->size;
         target->type = "linear";
         target->params = g_string_new("");
-        g_string_append_printf(target->params, "%s %" PRIu64,
-                                               disk->device,
-                                               disk->data_start + part->start);
+        _refine_partition(target->params, disk, part->start, part->size, err);
+
         pos += part->size;
     }
 
@@ -2878,9 +3068,7 @@ _dm_create_striped(const LDMVolumePrivate * const vol, GError ** const err)
             goto out;
         }
 
-        g_string_append_printf(target.params, " %s %" PRIu64,
-                                               disk->device,
-                                               disk->data_start + part->start);
+        _refine_partition(target.params, disk, part->start, part->size, err);
     }
 
     uint32_t cookie;
