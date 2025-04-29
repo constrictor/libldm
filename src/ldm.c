@@ -138,7 +138,7 @@ struct _vmdb
     uint32_t vblk_size;
     uint32_t vblk_first_offset;
 
-    uint16_t update_status;
+    uint16_t update_status; // see VMDB_UPDATE_STATUS for values (and don't forget about endianness conversion)
 
     uint16_t version_major;
     uint16_t version_minor;
@@ -161,6 +161,26 @@ struct _vmdb
 
     uint64_t last_accessed;
 } __attribute__((__packed__));
+
+/**
+ * VMDB_UPDATE_STATUS:
+ * @VMDB_UPDATE_STATUS_CLEAN: VMDB is clean
+ * @VMDB_UPDATE_STATUS_CHANGE: VMDB is in a change phase
+ * @VMDB_UPDATE_STATUS_COMMIT: VMDB is in a commit phase
+ * @VMDB_UPDATE_STATUS_ABORT: VMDB is in an abort phase
+ * @VMDB_UPDATE_STATUS_NEW: VMDB is new
+ * @VMDB_UPDATE_STATUS_STALE: VMDB is stale
+ * @VMDB_UPDATE_STATUS_OFFLINE: VMDB is offline
+ */
+typedef enum {
+    VMDB_UPDATE_STATUS_CLEAN = 0x01,
+    VMDB_UPDATE_STATUS_CHANGE = 0x02,
+    VMDB_UPDATE_STATUS_COMMIT = 0x03,
+    VMDB_UPDATE_STATUS_ABORT = 0x04,
+    VMDB_UPDATE_STATUS_NEW = 0x05,
+    VMDB_UPDATE_STATUS_STALE = 0x06,
+    VMDB_UPDATE_STATUS_OFFLINE = 0x07,
+} VMDB_UPDATE_STATUS;
 
 /* This is the header of every VBLK entry */
 struct _vblk_head
@@ -229,7 +249,8 @@ ldm_error_get_type(void)
                                       "notsupported" },
             { LDM_ERROR_MISSING_DISK, "LDM_ERROR_MISSING_DISK",
                                       "missing-disk" },
-            { LDM_ERROR_EXTERNAL, "LDM_ERROR_EXTERNAL", "external" }
+            { LDM_ERROR_EXTERNAL, "LDM_ERROR_EXTERNAL", "external" },
+            { LDM_ERROR_UNSAFE, "LDM_ERROR_UNSAFE", "unsafe" }
         };
         etype = g_enum_register_static("LDMError", values);
     }
@@ -2269,6 +2290,51 @@ ldm_add_fd(LDM * const o, const int fd, const guint secsize,
 
     const struct _vmdb *vmdb;
     if (!_find_vmdb(config, path, secsize, &vmdb, err)) goto error;
+
+    const uint16_t update_status = be16toh(vmdb->update_status);
+
+    const char* phase = NULL;
+    gboolean critical = FALSE;
+    switch (update_status) {
+    case VMDB_UPDATE_STATUS_CLEAN:
+        break; // Good!
+    case VMDB_UPDATE_STATUS_CHANGE:
+        phase = "change";
+        critical = TRUE;
+        break;
+    case VMDB_UPDATE_STATUS_ABORT:
+        phase = "abort";
+        critical = TRUE;
+        break;
+    case VMDB_UPDATE_STATUS_COMMIT:
+        phase = "commit";
+        critical = TRUE;
+        break;
+    case VMDB_UPDATE_STATUS_NEW:
+        phase = "new";
+        break;
+    case VMDB_UPDATE_STATUS_STALE:
+        phase = "stale";
+        break;
+    case VMDB_UPDATE_STATUS_OFFLINE:
+        phase = "offline";
+        break;
+    }
+    if (phase) {
+        if (critical) {
+            // VDMB is in the middle of LDM transaction.
+            g_set_error(err, LDM_ERROR, LDM_ERROR_UNSAFE,
+                    "LDM VMDB is in %s state. libldm doesn't support "
+                    "recovering from unfinished LDM transactions yet. "
+                    "Please reboot to Windows and let it finish the changes.",
+                    phase);
+            goto error;
+        } else {
+            // Weird state, but at least we're not in the middle of transaction.
+            // Should probably be safe to continue, but we'd better warn about it.
+            g_warning("LDM VMDB is in %s state for disk %s.", phase, path);
+        }
+    }
 
     uuid_t disk_guid;
     uuid_t disk_group_guid;

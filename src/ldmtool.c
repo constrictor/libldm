@@ -153,9 +153,11 @@ _scan(LDM *const ldm, gboolean ignore_errors,
 
                 GError *err = NULL;
                 if (!ldm_add(ldm, path, &err)) {
-                    if (!ignore_errors &&
-                        (err->domain != LDM_ERROR
-                         || err->code != LDM_ERROR_NOT_LDM)) {
+                    if ((!ignore_errors &&
+                         (err->domain != LDM_ERROR
+                          || err->code != LDM_ERROR_NOT_LDM)) ||
+                        (err->domain == LDM_ERROR &&
+                         err->code == LDM_ERROR_UNSAFE)) {
                         g_warning("Error scanning %s: %s", path, err->message);
                     }
                     g_error_free(err); err = NULL;

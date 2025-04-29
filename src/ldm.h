@@ -38,6 +38,7 @@ GQuark ldm_error_quark(void);
  * @LDM_ERROR_NOTSUPPORTED: Unsupported LDM metadata
  * @LDM_ERROR_MISSING_DISK: A disk is missing from a disk group
  * @LDM_ERROR_EXTERNAL: An error reported by an external library
+ * @LDM_ERROR_UNSAFE: LDM is in the state when it is unsafe to use it
  */
 typedef enum {
     LDM_ERROR_INTERNAL,
@@ -47,7 +48,8 @@ typedef enum {
     LDM_ERROR_INCONSISTENT,
     LDM_ERROR_NOTSUPPORTED,
     LDM_ERROR_MISSING_DISK,
-    LDM_ERROR_EXTERNAL
+    LDM_ERROR_EXTERNAL,
+    LDM_ERROR_UNSAFE
 } LDMError;
 
 #define LDM_TYPE_ERROR (ldm_error_get_type())
