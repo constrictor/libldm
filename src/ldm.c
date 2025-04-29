@@ -250,6 +250,8 @@ _dm_log_fn(const int level, const char * const file, const int line,
 {
     if (dm_errno == 0) return;
 
+    if (level > 4/*_LOG_WARN*/) return; /* ignore debug messages - libdevmapper has a ton of them */
+
     _dm_err_last_level = level;
     _dm_err_last_file = file;
     _dm_err_last_line = line;
